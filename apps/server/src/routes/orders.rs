@@ -1,12 +1,13 @@
-use axum::{extract::Path, http::StatusCode, Json};
-use futures::TryStreamExt;
-use mongodb::bson::doc;
+use axum::{extract::Path, http::StatusCode, Extension, Json};
 use utoipa_axum::{router::OpenApiRouter, routes};
 
-use crate::auth::{AuthError, AuthUser};
-use crate::db::{get_client, orders_collection};
-use crate::errors::{AppError, AppResult};
-use crate::models::{BatchDeleteRequest, BatchDeleteResponse, BatchUpsertRequest, BatchUpsertResponse, CreateOrderRequest, Order, OrderStatus, UpdateOrderRequest};
+use crate::application::{OrderApplication, UpdateOrder, UpsertOrder};
+use crate::auth::{AuthError, AuthPrincipal};
+use crate::errors::AppResult;
+use crate::models::{
+    BatchDeleteRequest, BatchDeleteResponse, BatchUpsertRequest, BatchUpsertResponse,
+    CreateOrderRequest, Order, UpdateOrderRequest,
+};
 
 pub fn router() -> OpenApiRouter {
     OpenApiRouter::new()
@@ -31,18 +32,13 @@ pub fn router() -> OpenApiRouter {
     ),
     security(("bearer_auth" = []))
 )]
-async fn list_orders(AuthUser(claims): AuthUser) -> AppResult<Json<Vec<Order>>> {
-    tracing::info!("GET /orders - user: {}", claims.sub);
+async fn list_orders(
+    Extension(application): Extension<OrderApplication>,
+    AuthPrincipal(principal): AuthPrincipal,
+) -> AppResult<Json<Vec<Order>>> {
+    tracing::info!("GET /orders - user: {}", principal.user_id().as_str());
 
-    let entities: Vec<_> = orders_collection()
-        .find(doc! { "user_id": &claims.sub })
-        .await
-        .map_err(AppError::database)?
-        .try_collect()
-        .await
-        .map_err(AppError::database)?;
-
-    let orders: Vec<Order> = entities.into_iter().map(Order::from).collect();
+    let orders = application.list_orders(&principal).await?;
 
     tracing::info!("GET /orders - returning {} orders", orders.len());
     Ok(Json(orders))
@@ -62,27 +58,40 @@ async fn list_orders(AuthUser(claims): AuthUser) -> AppResult<Json<Vec<Order>>> 
     security(("bearer_auth" = []))
 )]
 async fn create_order(
-    AuthUser(claims): AuthUser,
+    Extension(application): Extension<OrderApplication>,
+    AuthPrincipal(principal): AuthPrincipal,
     Json(payload): Json<CreateOrderRequest>,
 ) -> AppResult<(StatusCode, Json<Order>)> {
     tracing::info!(
         "POST /orders - user: {}, order_number: {}",
-        claims.sub,
+        principal.user_id().as_str(),
         payload.order_number
     );
 
-    let entity = payload.into_entity(claims.sub);
+    let order = application
+        .upsert_order(&principal, UpsertOrder::from(payload))
+        .await?;
 
-    // Upsert: update if exists, insert if not
-    let filter = doc! { "order_number": &entity.order_number, "user_id": &entity.user_id };
-    orders_collection()
-        .replace_one(filter, &entity)
-        .upsert(true)
-        .await
-        .map_err(AppError::database)?;
+    tracing::info!("POST /orders - canonical order: {}", order.id);
+    Ok((StatusCode::CREATED, Json(order)))
+}
 
-    tracing::info!("POST /orders - upserted order: {}", entity.id);
-    Ok((StatusCode::CREATED, Json(Order::from(entity))))
+impl From<CreateOrderRequest> for UpsertOrder {
+    fn from(request: CreateOrderRequest) -> Self {
+        Self {
+            id: request.id,
+            order_number: request.order_number,
+            product_name: request.product_name,
+            order_date: request.order_date,
+            product_image: request.product_image,
+            price: request.price,
+            status: request.status,
+            note: request.note,
+            updated_at: request.updated_at,
+            created_at: request.created_at,
+            deleted_at: request.deleted_at,
+        }
+    }
 }
 
 #[utoipa::path(
@@ -99,38 +108,22 @@ async fn create_order(
     security(("bearer_auth" = []))
 )]
 async fn batch_upsert_orders(
-    AuthUser(claims): AuthUser,
+    Extension(application): Extension<OrderApplication>,
+    AuthPrincipal(principal): AuthPrincipal,
     Json(payload): Json<BatchUpsertRequest>,
 ) -> AppResult<Json<BatchUpsertResponse>> {
     let count = payload.orders.len();
-    if count > 100 {
-        return Err(AppError::bad_request("Batch size exceeds maximum of 100"));
-    }
-    tracing::info!("POST /orders/batch - user: {}, count: {}", claims.sub, count);
+    tracing::info!(
+        "POST /orders/batch - user: {}, count: {}",
+        principal.user_id().as_str(),
+        count
+    );
 
-    let collection = orders_collection();
-    let mut models = Vec::with_capacity(count);
+    let inputs = payload.orders.into_iter().map(UpsertOrder::from).collect();
+    let upserted = application.batch_upsert_orders(&principal, inputs).await?;
 
-    for order_req in payload.orders {
-        let entity = order_req.into_entity(claims.sub.clone());
-        let filter = doc! { "order_number": &entity.order_number, "user_id": &entity.user_id };
-        let mut model = collection
-            .replace_one_model(filter, &entity)
-            .map_err(AppError::database)?;
-        model.upsert = Some(true);
-        models.push(model);
-    }
-
-    let result = get_client()
-        .bulk_write(models)
-        .ordered(false)
-        .await
-        .map_err(AppError::database)?;
-
-    let upserted = result.modified_count + result.upserted_count + result.inserted_count;
-    tracing::info!("POST /orders/batch - upserted {} orders (inserted: {}, modified: {}, upserted: {})",
-        upserted, result.inserted_count, result.modified_count, result.upserted_count);
-    Ok(Json(BatchUpsertResponse { upserted: upserted as usize }))
+    tracing::info!("POST /orders/batch - applied {} orders", upserted);
+    Ok(Json(BatchUpsertResponse { upserted }))
 }
 
 #[utoipa::path(
@@ -147,21 +140,22 @@ async fn batch_upsert_orders(
     security(("bearer_auth" = []))
 )]
 async fn batch_delete_orders(
-    AuthUser(claims): AuthUser,
+    Extension(application): Extension<OrderApplication>,
+    AuthPrincipal(principal): AuthPrincipal,
     Json(payload): Json<BatchDeleteRequest>,
 ) -> AppResult<Json<BatchDeleteResponse>> {
-    tracing::info!("POST /orders/batch-delete - user: {}, count: {}", claims.sub, payload.ids.len());
+    tracing::info!(
+        "POST /orders/batch-delete - user: {}, count: {}",
+        principal.user_id().as_str(),
+        payload.ids.len()
+    );
 
-    let result = orders_collection()
-        .delete_many(doc! {
-            "id": { "$in": &payload.ids },
-            "user_id": &claims.sub,
-        })
-        .await
-        .map_err(AppError::database)?;
+    let deleted = application
+        .batch_delete_orders(&principal, payload.ids)
+        .await?;
 
-    tracing::info!("POST /orders/batch-delete - deleted {} orders", result.deleted_count);
-    Ok(Json(BatchDeleteResponse { deleted: result.deleted_count as usize }))
+    tracing::info!("POST /orders/batch-delete - deleted {} orders", deleted);
+    Ok(Json(BatchDeleteResponse { deleted }))
 }
 
 #[utoipa::path(
@@ -180,16 +174,20 @@ async fn batch_delete_orders(
     ),
     security(("bearer_auth" = []))
 )]
-async fn get_order(AuthUser(claims): AuthUser, Path(id): Path<String>) -> AppResult<Json<Order>> {
-    tracing::info!("GET /orders/{} - user: {}", id, claims.sub);
+async fn get_order(
+    Extension(application): Extension<OrderApplication>,
+    AuthPrincipal(principal): AuthPrincipal,
+    Path(id): Path<String>,
+) -> AppResult<Json<Order>> {
+    tracing::info!(
+        "GET /orders/{} - user: {}",
+        id,
+        principal.user_id().as_str()
+    );
 
-    let entity = orders_collection()
-        .find_one(doc! { "id": &id, "user_id": &claims.sub })
-        .await
-        .map_err(AppError::database)?
-        .ok_or_else(|| AppError::not_found("Order"))?;
+    let order = application.get_order(&principal, &id).await?;
 
-    Ok(Json(Order::from(entity)))
+    Ok(Json(order))
 }
 
 #[utoipa::path(
@@ -211,48 +209,29 @@ async fn get_order(AuthUser(claims): AuthUser, Path(id): Path<String>) -> AppRes
     security(("bearer_auth" = []))
 )]
 async fn update_order(
-    AuthUser(claims): AuthUser,
+    Extension(application): Extension<OrderApplication>,
+    AuthPrincipal(principal): AuthPrincipal,
     Path(id): Path<String>,
     Json(payload): Json<UpdateOrderRequest>,
 ) -> AppResult<StatusCode> {
-    tracing::info!("PATCH /orders/{} - user: {}", id, claims.sub);
+    tracing::info!(
+        "PATCH /orders/{} - user: {}",
+        id,
+        principal.user_id().as_str()
+    );
 
-    let mut update_doc = doc! {};
-
-    if let Some(status) = &payload.status {
-        let status_str = match status {
-            OrderStatus::Uncommented => "uncommented",
-            OrderStatus::Commented => "commented",
-            OrderStatus::CommentRevealed => "comment_revealed",
-            OrderStatus::Reimbursed => "reimbursed",
-        };
-        update_doc.insert("status", status_str);
-    }
-    if let Some(note) = &payload.note {
-        update_doc.insert("note", note);
-    }
-    if let Some(updated_at) = &payload.updated_at {
-        update_doc.insert("updated_at", updated_at);
-    }
-    if let Some(deleted_at) = &payload.deleted_at {
-        update_doc.insert("deleted_at", deleted_at);
-    }
-
-    if update_doc.is_empty() {
-        return Err(AppError::bad_request("No fields to update"));
-    }
-
-    let result = orders_collection()
-        .update_one(
-            doc! { "id": &id, "user_id": &claims.sub },
-            doc! { "$set": update_doc },
+    application
+        .update_order(
+            &principal,
+            &id,
+            UpdateOrder {
+                status: payload.status,
+                note: payload.note,
+                updated_at: payload.updated_at,
+                deleted_at: payload.deleted_at,
+            },
         )
-        .await
-        .map_err(AppError::database)?;
-
-    if result.matched_count == 0 {
-        return Err(AppError::not_found("Order"));
-    }
+        .await?;
 
     tracing::info!("PATCH /orders/{} - updated", id);
     Ok(StatusCode::OK)
@@ -274,18 +253,22 @@ async fn update_order(
     ),
     security(("bearer_auth" = []))
 )]
-async fn delete_order(AuthUser(claims): AuthUser, Path(id): Path<String>) -> AppResult<StatusCode> {
-    tracing::info!("DELETE /orders/{} - user: {}", id, claims.sub);
+async fn delete_order(
+    Extension(application): Extension<OrderApplication>,
+    AuthPrincipal(principal): AuthPrincipal,
+    Path(id): Path<String>,
+) -> AppResult<StatusCode> {
+    tracing::info!(
+        "DELETE /orders/{} - user: {}",
+        id,
+        principal.user_id().as_str()
+    );
 
-    let result = orders_collection()
-        .delete_one(doc! { "id": &id, "user_id": &claims.sub })
-        .await
-        .map_err(AppError::database)?;
-
-    if result.deleted_count == 0 {
-        return Err(AppError::not_found("Order"));
-    }
+    application.delete_order(&principal, &id).await?;
 
     tracing::info!("DELETE /orders/{} - deleted", id);
     Ok(StatusCode::NO_CONTENT)
 }
+
+#[cfg(test)]
+mod tests;

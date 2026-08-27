@@ -5,16 +5,20 @@ WORKDIR /app
 # Install build dependencies for OpenSSL and curl for swagger-ui download
 RUN apt-get update && apt-get install -y pkg-config libssl-dev curl && rm -rf /var/lib/apt/lists/*
 
-# Copy manifests first for dependency caching
-COPY Cargo.toml Cargo.lock* ./
+# Fly builds from the repository root so the server and CLI share one lockfile.
+COPY Cargo.toml Cargo.lock ./
+COPY apps/server/Cargo.toml ./apps/server/Cargo.toml
+COPY apps/cli/Cargo.toml ./apps/cli/Cargo.toml
 
-# Create dummy src to cache dependencies
-RUN mkdir src && echo "fn main() {}" > src/main.rs
-RUN cargo build --release && rm -rf src
+# Create minimal workspace targets to cache dependencies.
+RUN mkdir -p apps/server/src apps/cli/src \
+    && echo "fn main() {}" > apps/server/src/main.rs \
+    && echo "fn main() {}" > apps/cli/src/main.rs
+RUN cargo build --release -p server
 
 # Copy actual source and rebuild
-COPY src ./src
-RUN touch src/main.rs && cargo build --release
+COPY apps/server/src ./apps/server/src
+RUN touch apps/server/src/main.rs && cargo build --release -p server
 
 FROM debian:bookworm-slim
 
