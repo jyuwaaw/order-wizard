@@ -76,6 +76,25 @@ impl From<OrderEntity> for Order {
     }
 }
 
+impl From<Order> for OrderEntity {
+    fn from(order: Order) -> Self {
+        Self {
+            id: order.id,
+            user_id: order.user_id,
+            order_number: order.order_number,
+            product_name: order.product_name,
+            order_date: order.order_date,
+            product_image: order.product_image,
+            price: order.price,
+            status: order.status,
+            note: order.note,
+            updated_at: order.updated_at,
+            created_at: order.created_at,
+            deleted_at: order.deleted_at,
+        }
+    }
+}
+
 #[derive(Debug, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateOrderRequest {
@@ -94,25 +113,6 @@ pub struct CreateOrderRequest {
     pub created_at: Option<String>,
     #[serde(default)]
     pub deleted_at: Option<String>,
-}
-
-impl CreateOrderRequest {
-    pub fn into_entity(self, user_id: String) -> OrderEntity {
-        OrderEntity {
-            id: self.id,
-            user_id,
-            order_number: self.order_number,
-            product_name: self.product_name,
-            order_date: self.order_date,
-            product_image: self.product_image,
-            price: self.price,
-            status: self.status,
-            note: self.note,
-            updated_at: self.updated_at,
-            created_at: self.created_at,
-            deleted_at: self.deleted_at,
-        }
-    }
 }
 
 #[derive(Debug, Deserialize, ToSchema)]

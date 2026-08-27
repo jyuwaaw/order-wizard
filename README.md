@@ -1,6 +1,6 @@
 # Amazon Order Wizard
 
-A browser extension for tracking Amazon orders with cloud sync support.
+An offline-first Amazon order tracker with a Rust API and agent-safe CLI.
 
 ## Features
 
@@ -10,6 +10,8 @@ A browser extension for tracking Amazon orders with cloud sync support.
 - **Status Workflow** - Track orders through: Uncommented → Commented → Comment Revealed → Reimbursed
 - **Export** - Export orders to CSV
 - **Search & Filter** - Fuzzy search and filter by status
+- **Agent Access** - Installable JSON CLI for list, search, detail, status, and note operations
+- **Least Privilege** - CLI/agent credentials cannot create, delete, or batch-mutate orders
 
 ## Architecture
 
@@ -17,8 +19,11 @@ A browser extension for tracking Amazon orders with cloud sync support.
 
 ```
 apps/
-├── extension/    # React 19 browser extension (Vite + TailwindCSS 4)
+├── cli/          # Rust CLI for Skill-capable agents
+├── extension/    # React 19 browser extension (WXT + TailwindCSS 4)
 └── server/       # Rust API (Axum 0.8 + MongoDB)
+skills/
+└── order-wizard/ # Agent instructions for the CLI
 ```
 
 ### Tech Stack
@@ -33,7 +38,11 @@ apps/
 **Server:**
 - Rust with Axum 0.8
 - MongoDB
-- JWT validation with JWKS caching
+- Cognito access-token validation with JWKS caching and scope-derived capabilities
+
+**CLI:**
+- Rust with Clap and Reqwest
+- Stable JSON stdout/stderr contract for AI agents
 
 ## Getting Started
 
@@ -80,12 +89,13 @@ Run `just` to see all available commands:
 |---------|-------------|
 | `just dev` | Start MongoDB + extension dev server + Rust server |
 | `just stop` | Kill all dev processes |
-| `just build` | Build extension + server |
-| `just check` | Run all checks (typecheck + lint + clippy) |
+| `just build` | Build extension, server, and CLI |
+| `just check` | Run TypeScript and Rust checks/tests |
 | `just typecheck` | TypeScript type checking |
 | `just lint` | Biome lint |
 | `just lint-fix` | Biome lint with auto-fix |
 | `just format` | Biome format |
+| `just bump <version>` | Synchronize release versions and refresh Cargo.lock |
 | `just db` | Start MongoDB via docker-compose |
 | `just db-stop` | Stop MongoDB |
 
@@ -105,8 +115,55 @@ VITE_API_BASE_URL=http://localhost:3000
 ```
 MONGODB_URI=mongodb://localhost:27017
 OIDC_ISSUER=https://cognito-idp.<region>.amazonaws.com/<pool-id>
-OIDC_CLIENT_ID=<client-id>
+OIDC_CLIENT_ID=<extension-public-client-id>
+OIDC_CLI_CLIENT_ID=<cli-public-client-id>
+RESOURCE_URI=https://api.example.com
 ```
+
+`RESOURCE_URI` must also be the Cognito resource-server identifier. Both public app clients request resource binding so access-token `aud` equals this URI.
+
+## Agent CLI
+
+Install from the repository:
+
+```bash
+cargo install --git https://github.com/spinsirr/order-wizard order-wizard-cli --bin order-wizard
+```
+
+The current automation seam reads `ORDER_WIZARD_API_URL` and `ORDER_WIZARD_ACCESS_TOKEN` from the local environment. The token must come from the CLI public app client and include the API audience plus `orders.read`, `orders.status.write`, and `orders.note.write` scopes.
+
+```bash
+order-wizard orders list --limit 20
+order-wizard orders search "wireless headphones" --status commented
+order-wizard orders get <order-id>
+order-wizard orders status <order-id> reimbursed
+order-wizard orders note <order-id> "Follow up tomorrow"
+```
+
+The paired Skill is in `skills/order-wizard`. Native `auth login` remains gated on selecting and validating a production Cognito callback strategy; the AWS-documented HTTP loopback callback is testing-only.
+
+## Releases
+
+Releases are tag-driven. First prepare and merge the version bump:
+
+```bash
+just bump 1.1.0
+git add package.json Cargo.toml Cargo.lock
+git commit -m "chore: release 1.1.0"
+```
+
+After that commit is merged, update local `main`, create the matching tag, and push it:
+
+```bash
+git switch main
+git pull --ff-only
+git tag -a v1.1.0 -m "Release v1.1.0"
+git push origin v1.1.0
+```
+
+The tag must match the root package version and point to a commit on `main`. The release workflow reruns the shared CI checks, packages the production extension, builds native CLI archives for Linux, macOS, and Windows, deploys that tagged commit to Fly.io, runs a health smoke test, and then publishes the GitHub Release with SHA-256 checksums.
+
+Configure `VITE_COGNITO_AUTHORITY`, `VITE_COGNITO_CLIENT_ID`, `VITE_COGNITO_DOMAIN`, and `VITE_API_BASE_URL` as repository secrets. `FLY_API_TOKEN` must be available to the `production` GitHub environment; deployment protection rules can be added to that environment when approval is required.
 
 ## API Documentation
 

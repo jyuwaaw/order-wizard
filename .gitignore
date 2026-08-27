@@ -38,6 +38,7 @@ coverage/
 
 # Rust
 Cargo.lock
+!/Cargo.lock
 *.rs.bk
 
 # Misc

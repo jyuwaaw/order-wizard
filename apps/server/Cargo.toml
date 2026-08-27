@@ -1,9 +1,11 @@
 [package]
 name = "server"
-version = "1.0.10"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
 
 [dependencies]
+async-trait = "0.1"
 axum = "0.8"
 axum-extra = { version = "0.10", features = ["typed-header"] }
 tokio = { version = "1", features = ["full"] }
@@ -21,4 +23,9 @@ utoipa-swagger-ui = { version = "9", features = ["axum"] }
 dotenvy = "0.15"
 jsonwebtoken = "9"
 reqwest = { version = "0.12", features = ["json"] }
+regex = "1"
 tower_governor = "0.8"
+time = { version = "0.3", features = ["formatting"] }
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
