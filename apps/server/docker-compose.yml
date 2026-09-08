@@ -10,15 +10,18 @@ services:
       MONGO_INITDB_DATABASE: order_wizard
 
   server:
-    build: .
+    build:
+      context: ../..
+      dockerfile: apps/server/Dockerfile
     ports:
       - "3000:3000"
     environment:
       - PORT=3000
       - MONGODB_URI=mongodb://mongo:27017
-      - AWS_COGNITO_REGION=${AWS_COGNITO_REGION}
-      - AWS_COGNITO_USER_POOL_ID=${AWS_COGNITO_USER_POOL_ID}
-      - AWS_COGNITO_CLIENT_ID=${AWS_COGNITO_CLIENT_ID}
+      - RESOURCE_URI=${RESOURCE_URI:-http://localhost:3000}
+      - OIDC_ISSUER=${OIDC_ISSUER}
+      - OIDC_CLIENT_ID=${OIDC_CLIENT_ID}
+      - OIDC_CLI_CLIENT_ID=${OIDC_CLI_CLIENT_ID}
     depends_on:
       - mongo
 

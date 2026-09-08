@@ -16,10 +16,10 @@ just dev          # Start MongoDB + extension dev server + Rust server
 just stop         # Kill all dev processes
 
 # Build
-just build        # Build extension + server
+just build        # Build extension + Rust server and CLI
 
 # Code Quality
-just check        # Run all checks (typecheck + lint + clippy)
+just check        # Run TypeScript and Rust checks/tests
 just ci           # Alias for check
 just typecheck    # TypeScript check
 just lint         # Biome lint
@@ -34,6 +34,7 @@ just db-stop      # Stop MongoDB
 just install      # Install dependencies
 just setup        # Setup git hooks
 just clean        # Clean all build artifacts
+just bump X.Y.Z   # Synchronize release versions and refresh Cargo.lock
 ```
 
 ## Architecture
@@ -41,13 +42,17 @@ just clean        # Clean all build artifacts
 ### Monorepo Structure
 - **apps/extension/** - React 19 browser extension (Vite + TailwindCSS 4)
 - **apps/server/** - Rust API (Axum 0.8 + MongoDB)
+- **apps/cli/** - Installable Rust CLI with a stable JSON contract
+- **skills/order-wizard/** - Agent instructions paired with the CLI
 - Package manager: Bun (workspaces in `apps/*`)
+- Releases are created only from matching `vX.Y.Z` tags on `main`; that workflow builds all user artifacts and deploys the server from the tagged commit.
 
 ### Authentication Flow
 1. Cognito OIDC authorization code flow via oauth4webapi
-2. Extension receives JWT access token
-3. Token set on ApiRepository via AuthContext effect
-4. Server validates JWT against Cognito JWKS (cached 1 hour)
+2. Authorization requests bind tokens to `RESOURCE_URI` and request custom order scopes
+3. Extension receives an access token; CLI uses a separate public app client
+4. Server validates RS256, issuer, expiry, `token_use=access`, resource audience, and client allowlist
+5. Final token scopes are intersected with the app client's maximum capabilities to construct `Principal`
 
 ### Extension Structure (apps/extension/src/)
 ```
@@ -77,15 +82,15 @@ src/
 ### Server Structure (apps/server/src/)
 ```
 src/
-├── main.rs              # Server setup, routes, CORS, Swagger UI
-├── models.rs            # OrderStatus, Order, request/response types
-├── errors.rs            # AppError enum, AppResult type
+├── main.rs              # Minimal binary entrypoint
+├── lib.rs               # Composition root and Axum setup
+├── application/         # OrderApplication and tenant-scoped repository port
+├── auth/                # Cognito verification and scope-to-Principal mapping
 ├── db.rs                # MongoDB connection
-├── auth/
-│   └── mod.rs           # JWT validation, JWKS caching, AuthUser extractor
+├── models.rs            # Shared transport/persistence models
 └── routes/
-    ├── mod.rs           # Route exports
-    └── orders.rs        # Order CRUD handlers
+    ├── orders.rs        # Extension sync/CRUD REST surface
+    └── agent_orders.rs  # Restricted list/search/detail/status/note REST surface
 ```
 
 ### Data Sync
@@ -107,8 +112,10 @@ Uncommented -> Commented -> CommentRevealed -> Reimbursed
 - ErrorBoundary catches React render errors at top level
 - Rust uses `?` operator with `AppError` type, panics for unrecoverable states
 
-**Local-First** - localStorage is the source of truth:
-- All reads/writes go to localStorage immediately
+**Offline-First** - localStorage is the extension's immediate working copy:
+- Extension reads/writes go to localStorage immediately
+- MongoDB is the shared cloud replica used for cross-device and Agent access
+- Sync uses `updatedAt` last-write-wins; every writer must advance `updatedAt`
 - Cloud sync happens on login + manual trigger
 - Works offline, syncs when connected
 
@@ -320,7 +327,9 @@ VITE_API_BASE_URL=http://localhost:3000
 ```
 MONGODB_URI=mongodb://localhost:27017
 OIDC_ISSUER=https://cognito-idp.<region>.amazonaws.com/<pool-id>
-OIDC_CLIENT_ID=<client-id>
+OIDC_CLIENT_ID=<extension-public-client-id>
+OIDC_CLI_CLIENT_ID=<cli-public-client-id>
+RESOURCE_URI=https://api.example.com
 ```
 
 ## Data Model

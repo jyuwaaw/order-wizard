@@ -1,7 +1,13 @@
 import { createContext, useContext, useState, useEffect, useCallback, type ReactNode } from 'react';
 import * as oauth from 'oauth4webapi';
 import { apiRepository } from '@/config';
-import { authorizationServer, oauthClient, buildAuthorizationUrl, buildLogoutUrl } from '@/config/oauth';
+import {
+  authorizationServer,
+  oauthClient,
+  buildAuthorizationUrl,
+  buildLogoutUrl,
+  revokeRefreshToken,
+} from '@/config/oauth';
 import { AUTH_STORAGE_KEY, CURRENT_USER_STORAGE_KEY } from '@/constants';
 import type { AuthUser } from '@/types';
 
@@ -166,7 +172,8 @@ export function AuthProvider({ children }: AuthProviderProps) {
     const redirectUri = chrome.identity.getRedirectURL();
     const codeVerifier = oauth.generateRandomCodeVerifier();
     const codeChallenge = await oauth.calculatePKCECodeChallenge(codeVerifier);
-    const authUrl = buildAuthorizationUrl(codeChallenge);
+    const state = oauth.generateRandomState();
+    const authUrl = buildAuthorizationUrl(codeChallenge, state);
 
     setIsLoading(true);
     setError(null);
@@ -185,7 +192,7 @@ export function AuthProvider({ children }: AuthProviderProps) {
             authorizationServer,
             oauthClient,
             new URL(responseUrl),
-            oauth.expectNoState
+            state
           );
 
           const response = await oauth.authorizationCodeGrantRequest(
@@ -228,16 +235,24 @@ export function AuthProvider({ children }: AuthProviderProps) {
     );
   }, [setAuthenticatedUser]);
 
-  const signOut = useCallback(() => {
-    clearAuth();
+  const signOut = useCallback(async () => {
+    const refreshToken = user?.refresh_token;
+    if (refreshToken) {
+      try {
+        await revokeRefreshToken(refreshToken);
+      } catch {
+        // Local sign-out remains available if Cognito is temporarily unreachable.
+      }
+    }
 
+    clearAuth();
     chrome.identity.launchWebAuthFlow(
       { url: buildLogoutUrl(), interactive: false },
       () => {
         // Ignore errors on logout
       }
     );
-  }, [clearAuth]);
+  }, [clearAuth, user?.refresh_token]);
 
   const value: AuthContextValue = {
     isLoading,

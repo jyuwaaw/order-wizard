@@ -1,10 +1,12 @@
 use axum::{
-    http::StatusCode,
+    http::{header, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
     Json,
 };
 use serde::Serialize;
 use utoipa::ToSchema;
+
+use crate::application::ApplicationError;
 
 /// API error response
 #[derive(Debug, Serialize, ToSchema)]
@@ -16,6 +18,8 @@ pub struct ApiError {
 /// Application errors - fail fast with clear messages
 #[derive(Debug)]
 pub enum AppError {
+    /// Authenticated caller lacks the required capability
+    Forbidden,
     /// Resource not found
     NotFound(&'static str),
     /// Invalid request data
@@ -32,15 +36,28 @@ impl AppError {
     pub fn bad_request(message: impl Into<String>) -> Self {
         AppError::BadRequest(message.into())
     }
-
-    pub fn database(err: mongodb::error::Error) -> Self {
-        AppError::Database(err.to_string())
-    }
 }
 
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
+        if matches!(self, AppError::Forbidden) {
+            let mut response = (
+                StatusCode::FORBIDDEN,
+                Json(ApiError {
+                    code: "INSUFFICIENT_SCOPE",
+                    message: "Insufficient permissions".to_string(),
+                }),
+            )
+                .into_response();
+            response.headers_mut().insert(
+                header::WWW_AUTHENTICATE,
+                HeaderValue::from_static("Bearer error=\"insufficient_scope\""),
+            );
+            return response;
+        }
+
         let (status, code, message) = match self {
+            AppError::Forbidden => unreachable!("forbidden errors return above"),
             AppError::NotFound(resource) => (
                 StatusCode::NOT_FOUND,
                 "NOT_FOUND",
@@ -63,3 +80,14 @@ impl IntoResponse for AppError {
 
 /// Result type for handlers
 pub type AppResult<T> = Result<T, AppError>;
+
+impl From<ApplicationError> for AppError {
+    fn from(error: ApplicationError) -> Self {
+        match error {
+            ApplicationError::Forbidden => AppError::Forbidden,
+            ApplicationError::InvalidInput(message) => AppError::bad_request(message),
+            ApplicationError::NotFound => AppError::not_found("Order"),
+            ApplicationError::Repository(message) => AppError::Database(message),
+        }
+    }
+}

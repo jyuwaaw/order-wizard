@@ -22,7 +22,7 @@ stop:
 # Build everything
 build:
     cd apps/extension && bun run build
-    cd apps/server && cargo build --release
+    cargo build --workspace --release
     rm -rf /mnt/c/order-wizard-ext
     cp -r apps/extension/.output/chrome-mv3 /mnt/c/order-wizard-ext
 
@@ -31,7 +31,9 @@ check:
     cd apps/extension && bun run typecheck
     cd apps/extension && bun run lint
     cd apps/extension && bun run test
-    cd apps/server && cargo clippy
+    cargo fmt --all --check
+    cargo clippy --workspace --all-targets -- -D warnings
+    cargo test --workspace
 
 # Run extension unit tests
 test:
@@ -52,6 +54,7 @@ lint-fix:
 # Format code
 format:
     cd apps/extension && bun run format
+    cargo fmt --all
 
 # Start MongoDB
 db:
@@ -64,18 +67,16 @@ db-stop:
 # Clean all build artifacts
 clean:
     cd apps/extension && bun run clean
-    cd apps/server && cargo clean
+    cargo clean
 
 # Install dependencies
 install:
     cd apps/extension && bun install
+    cargo fetch
 
-# Bump version across all packages (single source of truth: root package.json)
+# Bump the synchronized product version and refresh Cargo.lock
 bump version:
-    jq --arg v "{{version}}" '.version = $v' package.json > tmp.json && mv tmp.json package.json
-    jq --arg v "{{version}}" '.version = $v' apps/extension/package.json > tmp.json && mv tmp.json apps/extension/package.json
-    sed -i '' 's/^version = ".*"/version = "{{version}}"/' apps/server/Cargo.toml
-    @echo "Bumped all packages to {{version}}"
+    bun scripts/set-version.ts "{{version}}"
 
 # Setup git hooks
 setup:

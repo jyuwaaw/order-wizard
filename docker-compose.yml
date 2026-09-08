@@ -1,8 +1,8 @@
 services:
   server:
     build:
-      context: ./apps/server
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: apps/server/Dockerfile
     env_file:
       - ./apps/server/.env.production
     ports:
